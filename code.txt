@@ -1,0 +1,659 @@
+
+!pip install -q pandas numpy matplotlib seaborn
+
+import os
+import glob
+import json
+import warnings
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from pathlib import Path
+from IPython.display import display
+
+warnings.filterwarnings("ignore")
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+
+# Dataset folder
+DATA_FOLDER = "/content/drive/MyDrive/t20_csv_files"
+OUTPUT_FOLDER = os.path.join(DATA_FOLDER, "output")
+
+os.makedirs(DATA_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+
+# Load CSV and JSON files
+def load_all_files(folder):
+
+    datasets = {}
+
+    files = glob.glob(
+        os.path.join(folder, "**", "*"),
+        recursive=True
+    )
+
+    for file_path in files:
+
+        if not os.path.isfile(file_path):
+            continue
+
+        if OUTPUT_FOLDER in os.path.abspath(file_path):
+            continue
+
+        file_name = os.path.basename(file_path)
+        extension = Path(file_path).suffix.lower()
+        dataset_name = Path(file_name).stem.lower()
+
+        try:
+
+            if extension == ".csv":
+
+                df = pd.read_csv(file_path)
+
+            elif extension == ".json":
+
+                with open(file_path, "r", encoding="utf-8") as file:
+                    json_data = json.load(file)
+
+                if isinstance(json_data, list):
+                    df = pd.json_normalize(json_data)
+
+                elif isinstance(json_data, dict):
+
+                    if isinstance(json_data.get("data"), list):
+                        df = pd.json_normalize(json_data["data"])
+
+                    elif isinstance(json_data.get("records"), list):
+                        df = pd.json_normalize(json_data["records"])
+
+                    else:
+                        df = pd.json_normalize(json_data)
+
+                else:
+                    continue
+
+            else:
+                continue
+
+            datasets[dataset_name] = df
+
+            print(
+                "Loaded:", file_name,
+                "| Rows:", len(df)
+            )
+
+        except Exception as e:
+            print("Error loading", file_name, ":", e)
+
+    return datasets
+
+
+datasets = load_all_files(DATA_FOLDER)
+
+
+# Identify datasets using column names
+def find_dataset(required_columns):
+
+    for name, df in datasets.items():
+
+        if set(required_columns).issubset(set(df.columns)):
+            print("Using dataset:", name)
+            return df.copy()
+
+    return None
+
+
+match_df = find_dataset([
+    "team1", "team2", "winner", "match_id"
+])
+
+batting_df = find_dataset([
+    "batsmanName", "runs", "balls", "match_id"
+])
+
+bowling_df = find_dataset([
+    "bowlerName", "wickets", "match_id"
+])
+
+
+# Display datasets
+for name, df in datasets.items():
+
+    print("\nDataset:", name)
+    print("Shape:", df.shape)
+    print("Columns:", df.columns.tolist())
+
+    display(df.head())
+
+
+# Data cleaning
+def clean_dataframe(df):
+
+    if df is None:
+        return None
+
+    df = df.copy()
+    df.columns = df.columns.str.strip()
+    df = df.drop_duplicates()
+
+    for column in df.select_dtypes(include="object").columns:
+
+        df[column] = df[column].apply(
+            lambda x: x.strip() if isinstance(x, str) else x
+        )
+
+    return df
+
+
+match_df = clean_dataframe(match_df)
+batting_df = clean_dataframe(batting_df)
+bowling_df = clean_dataframe(bowling_df)
+
+
+# Convert numeric columns
+def convert_numeric(df, columns):
+
+    if df is None:
+        return
+
+    for column in columns:
+
+        if column in df.columns:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce"
+            ).fillna(0)
+
+
+convert_numeric(
+    batting_df,
+    ["runs", "balls", "4s", "6s", "SR", "battingPos"]
+)
+
+convert_numeric(
+    bowling_df,
+    ["wickets", "runs", "overs", "maidens", "balls"]
+)
+
+
+# Dataset information
+print("\nDataset Information")
+
+if match_df is not None:
+
+    print("Total Matches:", len(match_df))
+
+    teams = pd.concat([
+        match_df["team1"],
+        match_df["team2"]
+    ])
+
+    print("Total Teams:", teams.nunique())
+
+if batting_df is not None:
+
+    print("Batting Records:", len(batting_df))
+    print("Total Players:", batting_df["batsmanName"].nunique())
+
+
+# Batting Analysis
+if batting_df is not None:
+
+    batting_stats = batting_df.groupby(
+        "batsmanName"
+    ).agg(
+        total_runs=("runs", "sum"),
+        total_balls=("balls", "sum"),
+        total_fours=("4s", "sum"),
+        total_sixes=("6s", "sum"),
+        innings=("match_id", "count")
+    ).reset_index()
+
+    batting_stats["strike_rate"] = np.where(
+        batting_stats["total_balls"] > 0,
+        batting_stats["total_runs"] /
+        batting_stats["total_balls"] * 100,
+        0
+    )
+
+    batting_stats["average_runs"] = np.where(
+        batting_stats["innings"] > 0,
+        batting_stats["total_runs"] /
+        batting_stats["innings"],
+        0
+    )
+
+    batting_stats["consistency_index"] = (
+        batting_df.groupby("batsmanName")["runs"]
+        .std()
+        .reindex(batting_stats["batsmanName"])
+        .fillna(0)
+        .values
+    )
+
+    batting_stats["power_factor"] = (
+        batting_stats["total_sixes"] * 6 +
+        batting_stats["total_fours"] * 4
+    )
+
+    print("\nBatting Statistics")
+    display(batting_stats.head(10))
+
+
+# Top Run Scorers
+if batting_df is not None:
+
+    top_scorers = batting_stats.nlargest(
+        10, "total_runs"
+    )
+
+    plt.figure(figsize=(12, 6))
+
+    sns.barplot(
+        data=top_scorers,
+        x="total_runs",
+        y="batsmanName"
+    )
+
+    plt.title("Top 10 Run Scorers")
+    plt.xlabel("Total Runs")
+    plt.ylabel("Player")
+    plt.tight_layout()
+    plt.show()
+
+
+# Strike Rate Analysis
+if batting_df is not None:
+
+    best_strike_rates = batting_stats[
+        batting_stats["total_balls"] >= 30
+    ].nlargest(10, "strike_rate")
+
+    plt.figure(figsize=(12, 6))
+
+    sns.barplot(
+        data=best_strike_rates,
+        x="strike_rate",
+        y="batsmanName"
+    )
+
+    plt.title("Top 10 Strike Rates")
+    plt.xlabel("Strike Rate")
+    plt.ylabel("Player")
+    plt.tight_layout()
+    plt.show()
+
+
+# Sixes Analysis
+if batting_df is not None:
+
+    most_sixes = batting_stats.nlargest(
+        10, "total_sixes"
+    )
+
+    plt.figure(figsize=(12, 6))
+
+    sns.barplot(
+        data=most_sixes,
+        x="total_sixes",
+        y="batsmanName"
+    )
+
+    plt.title("Top 10 Players by Sixes")
+    plt.xlabel("Total Sixes")
+    plt.ylabel("Player")
+    plt.tight_layout()
+    plt.show()
+
+
+# Team Batting Analysis
+if batting_df is not None and "teamInnings" in batting_df.columns:
+
+    team_batting = batting_df.groupby(
+        "teamInnings"
+    ).agg(
+        total_runs=("runs", "sum"),
+        total_balls=("balls", "sum"),
+        total_fours=("4s", "sum"),
+        total_sixes=("6s", "sum")
+    ).reset_index()
+
+    team_batting["strike_rate"] = np.where(
+        team_batting["total_balls"] > 0,
+        team_batting["total_runs"] /
+        team_batting["total_balls"] * 100,
+        0
+    )
+
+    print("\nTeam Batting Performance")
+    display(team_batting)
+
+    plt.figure(figsize=(12, 6))
+
+    sns.barplot(
+        data=team_batting.nlargest(10, "total_runs"),
+        x="total_runs",
+        y="teamInnings"
+    )
+
+    plt.title("Team Runs Comparison")
+    plt.xlabel("Total Runs")
+    plt.ylabel("Team")
+    plt.tight_layout()
+    plt.show()
+
+
+# Match Analysis
+if match_df is not None:
+
+    print("\nMatch Information")
+    display(match_df.head())
+
+    # Team Wins
+    team_wins = match_df["winner"].value_counts().reset_index()
+
+    team_wins.columns = ["team", "wins"]
+
+    plt.figure(figsize=(12, 6))
+
+    sns.barplot(
+        data=team_wins.head(10),
+        x="wins",
+        y="team"
+    )
+
+    plt.title("Team Wins")
+    plt.xlabel("Wins")
+    plt.ylabel("Team")
+    plt.tight_layout()
+    plt.show()
+
+    # Matches by Ground
+    if "ground" in match_df.columns:
+
+        ground_matches = match_df["ground"].value_counts().head(10)
+
+        plt.figure(figsize=(12, 6))
+
+        ground_matches.plot(kind="bar")
+
+        plt.title("Matches by Ground")
+        plt.xlabel("Ground")
+        plt.ylabel("Matches")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.show()
+
+    # Matches by Year
+    if "matchDate" in match_df.columns:
+
+        match_df["matchDate"] = pd.to_datetime(
+            match_df["matchDate"],
+            errors="coerce"
+        )
+
+        match_df["year"] = match_df["matchDate"].dt.year
+
+        yearly_matches = (
+            match_df["year"].value_counts().sort_index()
+        )
+
+        plt.figure(figsize=(10, 5))
+
+        yearly_matches.plot(
+            kind="line",
+            marker="o"
+        )
+
+        plt.title("Matches Per Year")
+        plt.xlabel("Year")
+        plt.ylabel("Matches")
+        plt.tight_layout()
+        plt.show()
+
+
+# Player Comparison
+if batting_df is not None:
+
+    player_comparison = batting_stats.nlargest(
+        10, "total_runs"
+    )
+
+    print("\nPlayer Comparison")
+
+    display(
+        player_comparison[[
+            "batsmanName",
+            "total_runs",
+            "strike_rate",
+            "total_sixes",
+            "total_fours",
+            "average_runs"
+        ]]
+    )
+
+
+# Bowling Analysis
+if bowling_df is not None:
+
+    bowling_stats = bowling_df.groupby(
+        "bowlerName"
+    ).agg(
+        total_wickets=("wickets", "sum"),
+        innings=("match_id", "count")
+    ).reset_index()
+
+    if "runs" in bowling_df.columns:
+
+        bowling_runs = bowling_df.groupby(
+            "bowlerName"
+        )["runs"].sum()
+
+        bowling_stats["runs_conceded"] = (
+            bowling_stats["bowlerName"].map(bowling_runs)
+        )
+
+    if "overs" in bowling_df.columns:
+
+        def overs_to_balls(value):
+
+            try:
+
+                parts = str(value).split(".")
+
+                completed_overs = int(parts[0])
+
+                extra_balls = (
+                    int(parts[1]) if len(parts) > 1 else 0
+                )
+
+                if extra_balls > 5:
+                    return 0
+
+                return completed_overs * 6 + extra_balls
+
+            except:
+                return 0
+
+        bowling_df["balls_bowled"] = (
+            bowling_df["overs"].apply(overs_to_balls)
+        )
+
+        total_balls = bowling_df.groupby(
+            "bowlerName"
+        )["balls_bowled"].sum()
+
+        bowling_stats["total_balls"] = (
+            bowling_stats["bowlerName"].map(total_balls)
+        )
+
+        bowling_stats["total_overs"] = (
+            bowling_stats["total_balls"] / 6
+        )
+
+    if "runs_conceded" in bowling_stats.columns:
+
+        bowling_stats["economy"] = np.where(
+            bowling_stats["total_balls"] > 0,
+            bowling_stats["runs_conceded"] /
+            bowling_stats["total_balls"] * 6,
+            0
+        )
+
+    print("\nBowling Statistics")
+    display(bowling_stats.head(10))
+
+    # Top Wicket Takers
+    top_wicket_takers = bowling_stats.nlargest(
+        10, "total_wickets"
+    )
+
+    plt.figure(figsize=(12, 6))
+
+    sns.barplot(
+        data=top_wicket_takers,
+        x="total_wickets",
+        y="bowlerName"
+    )
+
+    plt.title("Top 10 Wicket Takers")
+    plt.xlabel("Wickets")
+    plt.ylabel("Bowler")
+    plt.tight_layout()
+    plt.show()
+
+    # Bowling Economy
+    if "economy" in bowling_stats.columns:
+
+        best_economy = bowling_stats[
+            bowling_stats["total_balls"] >= 60
+        ].nsmallest(10, "economy")
+
+        plt.figure(figsize=(12, 6))
+
+        sns.barplot(
+            data=best_economy,
+            x="economy",
+            y="bowlerName"
+        )
+
+        plt.title("Best Bowling Economy")
+        plt.xlabel("Economy")
+        plt.ylabel("Bowler")
+        plt.tight_layout()
+        plt.show()
+
+
+# Player Performance Heatmap
+if batting_df is not None:
+
+    top_players = batting_stats.nlargest(
+        10, "total_runs"
+    )["batsmanName"]
+
+    player_data = batting_stats[
+        batting_stats["batsmanName"].isin(top_players)
+    ]
+
+    heatmap_data = player_data.set_index(
+        "batsmanName"
+    )[[
+        "total_runs",
+        "strike_rate",
+        "total_sixes",
+        "total_fours"
+    ]]
+
+    heatmap_normalized = (
+        heatmap_data - heatmap_data.min()
+    ) / (
+        heatmap_data.max() - heatmap_data.min()
+    ).replace(0, 1)
+
+    plt.figure(figsize=(10, 7))
+
+    sns.heatmap(
+        heatmap_normalized,
+        annot=True,
+        cmap="YlGnBu"
+    )
+
+    plt.title("Player Performance Heatmap")
+    plt.tight_layout()
+    plt.show()
+
+
+# Export Analysis Results
+if batting_df is not None:
+
+    batting_stats.to_csv(
+        os.path.join(OUTPUT_FOLDER, "batting_analysis.csv"),
+        index=False
+    )
+
+    if "team_batting" in globals():
+        team_batting.to_csv(
+            os.path.join(OUTPUT_FOLDER, "team_batting_analysis.csv"),
+            index=False
+        )
+
+if match_df is not None:
+
+    team_wins.to_csv(
+        os.path.join(OUTPUT_FOLDER, "team_wins.csv"),
+        index=False
+    )
+
+if bowling_df is not None:
+
+    bowling_stats.to_csv(
+        os.path.join(OUTPUT_FOLDER, "bowling_analysis.csv"),
+        index=False
+    )
+
+
+# Save final report
+report_path = os.path.join(
+    OUTPUT_FOLDER,
+    "cricket_analysis_report.txt"
+)
+
+with open(report_path, "w", encoding="utf-8") as file:
+
+    file.write("CRICKET PERFORMANCE ANALYSIS\n\n")
+
+    if batting_df is not None:
+
+        file.write("TOP RUN SCORERS\n")
+        file.write(top_scorers.to_string(index=False))
+        file.write("\n\n")
+
+        file.write("STRIKE RATE ANALYSIS\n")
+        file.write(best_strike_rates.to_string(index=False))
+        file.write("\n\n")
+
+        file.write("PLAYER COMPARISON\n")
+        file.write(player_comparison.to_string(index=False))
+        file.write("\n\n")
+
+    if match_df is not None:
+
+        file.write("TEAM WINS\n")
+        file.write(team_wins.to_string(index=False))
+        file.write("\n\n")
+
+    if bowling_df is not None:
+
+        file.write("BOWLING ANALYSIS\n")
+        file.write(bowling_stats.to_string(index=False))
+        file.write("\n\n")
+
+
+print("\nAnalysis completed.")
+print("Output folder:", OUTPUT_FOLDER)
